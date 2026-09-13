@@ -18,7 +18,7 @@ from difflib import SequenceMatcher
 
 from config import MUST_KNOW_COUNT, PERSONALIZED_COUNT_PER_CAT, OUTPUT_PATH
 from fetch import fetch_all
-from summarize import summarize_batch
+from summarize import summarize_batch, rank_headlines_by_significance
 
 CATEGORY_ORDER = ["politics", "sports", "entertainment", "economy", "tech", "global"]
 
@@ -28,12 +28,25 @@ def _is_similar(a, b, threshold=0.6):
 
 
 def dedupe(items):
-    """Drop near-duplicate headlines (same story picked up by multiple feeds)."""
+    """
+    Drop near-duplicate headlines (same story picked up by multiple feeds),
+    but keep count of how many raw items merged into each survivor - that
+    count is a real "how many independent sources are covering this" signal,
+    which is a much better proxy for "this actually matters" than recency
+    alone. A story that's fresh but only covered by one obscure feed is
+    probably niche; a story covered by 3+ independent feeds at once is
+    probably genuinely big.
+    """
     kept = []
     for item in items:
-        if any(_is_similar(item["title"], k["title"]) for k in kept):
-            continue
-        kept.append(item)
+        match = next((k for k in kept if _is_similar(item["title"], k["title"])), None)
+        if match:
+            match["corroboration_count"] += 1
+            match["corroborating_sources"].append(item.get("source"))
+        else:
+            item["corroboration_count"] = 1
+            item["corroborating_sources"] = [item.get("source")]
+            kept.append(item)
     print(f"[dedupe] {len(kept)}/{len(items)} unique stories after dedup")
     return kept
 
@@ -45,15 +58,41 @@ def group_by_category(items):
     return grouped
 
 
+def _rank_bucket(bucket):
+    """
+    Sort a category's candidates: most-corroborated first. Among items tied
+    on corroboration count, ask Gemini to judge which headline sounds most
+    broadly significant (headlines only - no fact invention, see
+    summarize.rank_headlines_by_significance). Falls back to recency if
+    that call fails or no API key is set - never blocks the pipeline.
+    """
+    by_corroboration = {}
+    for item in bucket:
+        by_corroboration.setdefault(item.get("corroboration_count", 1), []).append(item)
+
+    ranked = []
+    for count in sorted(by_corroboration.keys(), reverse=True):
+        tied_group = sorted(by_corroboration[count], key=lambda i: i.get("published") or "", reverse=True)
+        if len(tied_group) > 1:
+            headlines = [i["title"] for i in tied_group]
+            best_idx = rank_headlines_by_significance(headlines)
+            tied_group.insert(0, tied_group.pop(best_idx))
+        ranked.extend(tied_group)
+    return ranked
+
+
 def curate(items):
     """
     Split into:
-      must_know  -> one top story per category (in CATEGORY_ORDER), capped at MUST_KNOW_COUNT
-      personalized -> next few stories per category, capped at PERSONALIZED_COUNT_PER_CAT
-    Items are assumed already roughly time-sorted (most recent first) per category
-    since RSS feeds return newest-first.
+      must_know    -> one strong story per category (in CATEGORY_ORDER), capped
+                       at MUST_KNOW_COUNT, ranked by corroboration then recency -
+                       NOT just "whichever published most recently."
+      personalized -> next few stories per category, same ranking, capped at
+                       PERSONALIZED_COUNT_PER_CAT.
     """
     grouped = group_by_category(items)
+    for cat in grouped:
+        grouped[cat] = _rank_bucket(grouped[cat])
 
     must_know = []
     for cat in CATEGORY_ORDER:
@@ -61,7 +100,7 @@ def curate(items):
             break
         bucket = grouped.get(cat, [])
         if bucket:
-            must_know.append(bucket.pop(0))  # take the freshest, remove from pool
+            must_know.append(bucket.pop(0))  # take the top-ranked, remove from pool
 
     personalized = []
     for cat in CATEGORY_ORDER:
@@ -69,6 +108,8 @@ def curate(items):
         personalized.extend(bucket[:PERSONALIZED_COUNT_PER_CAT])
 
     print(f"[curate] must_know={len(must_know)} personalized={len(personalized)}")
+    for item in must_know:
+        print(f"  [must-know] ({item.get('corroboration_count')} sources) {item['title'][:70]}")
     return must_know, personalized
 
 
@@ -81,6 +122,7 @@ def to_card(item, is_must_know):
         "explainer": item.get("explainer", ""),
         "link": item.get("link"),
         "published": item.get("published"),
+        "corroboration_count": item.get("corroboration_count", 1),
         "must_know": is_must_know,
     }
 
@@ -105,7 +147,14 @@ def run():
     with open(OUTPUT_PATH, "w") as f:
         json.dump(output, f, indent=2)
 
-    print(f"[pipeline] wrote {OUTPUT_PATH} "
+    # Also keep a draft copy - same content, but this is what the optional
+    # Review page edits/republishes from, kept separate so a manual edit
+    # there doesn't get silently overwritten by re-running the pipeline.
+    from config import DRAFT_PATH
+    with open(DRAFT_PATH, "w") as f:
+        json.dump(output, f, indent=2)
+
+    print(f"[pipeline] auto-published to {OUTPUT_PATH} "
           f"({len(output['must_know'])} must-know, {len(output['personalized'])} personalized)")
 
 

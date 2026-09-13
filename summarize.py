@@ -32,14 +32,29 @@ Return STRICT JSON only, no markdown fences, no preamble, in this exact shape:
 
 Rules:
 - headline: max 12 words, plain language, no clickbait, no punctuation tricks
-- explainer: 2-3 sentences, what happened + why it matters, written for someone
-  with zero context. Do not quote the source verbatim - full rewrite.
+- explainer: 30-50 words exactly, what happened + why it matters, written for
+  someone with zero context. Do not quote the source verbatim - full rewrite.
+  Crisp and complete within that range - not a fragment, not padded.
 - confident: false if the source text was too short/vague to summarize safely
 """
 
 
 def _strip_html(text):
     return re.sub(r"<[^>]+>", " ", text or "").strip()
+
+
+def _trim_to_words(text, max_words=55):
+    """Safety net - if the model ignores the 30-50 word instruction, trim
+    rather than publish something bloated. Cuts at the last full sentence
+    that fits, falling back to a hard word cut if there's no good sentence break."""
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    truncated = " ".join(words[:max_words])
+    last_period = truncated.rfind(".")
+    if last_period > len(truncated) * 0.5:  # only use it if it's not too early
+        return truncated[:last_period + 1]
+    return truncated.rstrip(",;: ") + "..."
 
 
 def summarize_item(item):
@@ -79,7 +94,7 @@ def summarize_item(item):
         return None
 
     item["headline"] = parsed.get("headline", item["title"])[:120]
-    item["explainer"] = parsed.get("explainer", "")[:400]
+    item["explainer"] = _trim_to_words(parsed.get("explainer", ""), max_words=55)
     return item
 
 
@@ -91,6 +106,53 @@ def summarize_batch(items):
             out.append(result)
     print(f"[summarize] {len(out)}/{len(items)} items summarized successfully")
     return out
+
+
+RANK_SYSTEM_INSTRUCTION = """You are helping pick which of several news headlines, all
+already confirmed to be about similarly-sized stories (same number of
+sources covering each), is most likely to come up in general conversation
+today - broad relevance to an average person, not niche interest.
+
+You are given ONLY headlines - no article text. Do not invent facts about
+any of them, do not assume details not in the headline itself. Just judge
+which headline, taken at face value, sounds most broadly significant.
+
+Return STRICT JSON only, no markdown fences, no preamble:
+{"most_significant_index": 0}
+where the index refers to the 0-based position in the list given.
+"""
+
+
+def rank_headlines_by_significance(headlines):
+    """
+    headlines: list of strings, already pre-filtered to similar corroboration
+    counts (this only breaks ties, it doesn't override corroboration - see
+    pipeline.py). Returns the index of the most significant one, or 0 (first/
+    most recent) on any failure - fails toward the existing recency-based
+    order rather than blocking the pipeline.
+    """
+    if len(headlines) <= 1:
+        return 0
+    if not GEMINI_API_KEY:
+        return 0
+
+    numbered = "\n".join(f"{i}. {h}" for i, h in enumerate(headlines))
+    payload = {
+        "system_instruction": {"parts": [{"text": RANK_SYSTEM_INSTRUCTION}]},
+        "contents": [{"parts": [{"text": numbered}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 50},
+    }
+    try:
+        resp = requests.post(GEMINI_URL, json=payload, headers=GEMINI_HEADERS, timeout=15)
+        resp.raise_for_status()
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        text = re.sub(r"^```json\s*|\s*```$", "", text)
+        parsed = json.loads(text)
+        idx = int(parsed.get("most_significant_index", 0))
+        return idx if 0 <= idx < len(headlines) else 0
+    except Exception as e:
+        print(f"[warn] headline ranking failed, falling back to recency order: {e}")
+        return 0
 
 
 if __name__ == "__main__":

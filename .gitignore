@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
-.env
+.streamlit/secrets.toml
 data/users.json
+data/events.jsonl
 .DS_Store
 venv/
 *.egg-info/

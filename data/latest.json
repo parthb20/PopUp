@@ -1,0 +1,17 @@
+{
+  "generated_at": "2026-08-01T01:00:00+00:00",
+  "must_know": [
+    {
+      "category": "politics",
+      "sub_tag": "india",
+      "source": "Sample Data",
+      "headline": "This is sample data — run pipeline.py to get real stories",
+      "explainer": "Once you add a GEMINI_API_KEY and run the pipeline, this will be replaced with today's actual must-know stories, ranked by how many independent sources cover each one.",
+      "link": "#",
+      "published": null,
+      "corroboration_count": 1,
+      "must_know": true
+    }
+  ],
+  "personalized": []
+}

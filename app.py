@@ -19,14 +19,13 @@ Habit-forming design (Nir Eyal's Hook Model), applied honestly:
 import json
 import os
 import random
-import uuid
 from datetime import datetime, timezone, timedelta
 
 import streamlit as st
-from streamlit_cookies_manager import EncryptedCookieManager
 
 from storage import get_or_create_user, save_preferences, toggle_read, record_feedback, log_event
 from config import PUBLISHED_PATH
+from device_id import get_device_id
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -113,18 +112,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------- DEVICE IDENTITY
-cookies = EncryptedCookieManager(
-    prefix="popup/",
-    password=st.secrets.get("COOKIES_PASSWORD", "dev-only-change-in-production"),
-)
-if not cookies.ready():
-    st.stop()
-
-is_new_device = "device_id" not in cookies or not cookies["device_id"]
-if is_new_device:
-    cookies["device_id"] = str(uuid.uuid4())
-    cookies.save()
-device_id = cookies["device_id"]
+device_id, is_new_device = get_device_id()
 
 user = get_or_create_user(device_id)
 
